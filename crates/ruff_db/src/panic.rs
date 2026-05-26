@@ -24,15 +24,36 @@ impl Payload {
 impl std::fmt::Display for Payload {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(s) = self.0.downcast_ref::<String>() {
-            f.write_str(s)
+            write_stable_payload(f, s)
         } else if let Some(s) = self.0.downcast_ref::<&str>() {
-            f.write_str(s)
+            write_stable_payload(f, s)
         } else if let Some(s) = self.0.downcast_ref::<salsa::Cancelled>() {
             write!(f, "{s}")
         } else {
             f.write_str("Box<dyn Any>")
         }
     }
+}
+
+fn write_stable_payload(f: &mut std::fmt::Formatter<'_>, mut payload: &str) -> std::fmt::Result {
+    const SALSA_ID_PREFIX: &str = "[salsa id]: Id(";
+
+    while let Some(index) = payload.find(SALSA_ID_PREFIX) {
+        let (before_id, after_prefix) = payload.split_at(index + SALSA_ID_PREFIX.len());
+        f.write_str(before_id)?;
+
+        let Some(id_end) = after_prefix.find(')') else {
+            return f.write_str(after_prefix);
+        };
+
+        // Salsa IDs depend on the order in which queries intern values, so they can change
+        // between equivalent parallel checks. Keep the useful payload structure without exposing
+        // the volatile ID in user-facing panic diagnostics.
+        f.write_str("_")?;
+        payload = &after_prefix[id_end..];
+    }
+
+    f.write_str(payload)
 }
 
 impl PanicError {
@@ -177,6 +198,18 @@ where
 #[cfg(test)]
 mod tests {
     use salsa::{Database, Durability};
+
+    #[test]
+    fn hides_volatile_salsa_ids_in_payloads() {
+        let payload = super::Payload(Box::new(
+            "Definition { [salsa id]: Id(2896), file: File }".to_string(),
+        ));
+
+        assert_eq!(
+            payload.to_string(),
+            "Definition { [salsa id]: Id(_), file: File }"
+        );
+    }
 
     #[test]
     #[ignore = "super::catch_unwind installs a custom panic handler, which could effect test isolation"]
