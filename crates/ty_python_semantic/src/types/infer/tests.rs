@@ -478,6 +478,210 @@ fn dependency_implicit_instance_attribute() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+fn full_scope_collection_implicit_attribute_cycle_is_entrypoint_independent() -> anyhow::Result<()>
+{
+    fn write_files(db: &mut TestDb) -> anyhow::Result<()> {
+        db.write_dedented(
+            "/src/mod.py",
+            r#"
+            import collections
+            from fnmatch import fnmatch
+            import re
+            import shlex
+            from dataclasses import dataclass
+            from typing import Optional, Union, cast
+
+            class ConfigSubprocess:
+                sensitive_wildcards: list[str] = []
+
+            class Config:
+                subprocess = ConfigSubprocess()
+
+            config = Config()
+
+            class RLock:
+                def __enter__(self): ...
+                def __exit__(self, *args): ...
+
+            @dataclass(eq=False)
+            class SubprocessCmdLineCacheEntry:
+                binary: Optional[str] = None
+                arguments: Optional[list] = None
+                truncated: bool = False
+                env_vars: Optional[list] = None
+
+            class SubprocessCmdLine:
+                _CACHE: dict[str, SubprocessCmdLineCacheEntry] = {}
+                _CACHE_DEQUE: collections.deque[str] = collections.deque()
+                _CACHE_MAXSIZE = 32
+                _CACHE_LOCK = RLock()
+                ENV_VARS_ALLOWLIST = {"LD_PRELOAD"}
+                BINARIES_DENYLIST = {"md5"}
+                SENSITIVE_WORDS_WILDCARDS = ["*password*"]
+                _COMPILED_ENV_VAR_REGEXP = re.compile(r"\b[A-Z_][A-Z0-9_]*=\w+")
+
+                @classmethod
+                def _add_new_cache_entry(cls, key, env_vars, binary, arguments, truncated):
+                    if key in cls._CACHE:
+                        return
+                    cache_entry = SubprocessCmdLineCacheEntry()
+                    cache_entry.binary = binary
+                    cache_entry.arguments = arguments
+                    cache_entry.truncated = truncated
+                    cache_entry.env_vars = env_vars
+                    with cls._CACHE_LOCK:
+                        if len(cls._CACHE_DEQUE) >= cls._CACHE_MAXSIZE:
+                            last_cache_key = cls._CACHE_DEQUE[-1]
+                            del cls._CACHE[last_cache_key]
+                            cls._CACHE_DEQUE.pop()
+                        cls._CACHE[key] = cache_entry
+                        cls._CACHE_DEQUE.appendleft(key)
+                    return cache_entry
+
+                def __init__(self, shell_args: Union[str, list[str]], shell: bool = False) -> None:
+                    cache_key = str(shell_args) + str(shell)
+                    self._cache_entry = SubprocessCmdLine._CACHE.get(cache_key)
+                    if self._cache_entry:
+                        self.env_vars = self._cache_entry.env_vars
+                        self.binary = self._cache_entry.binary
+                        self.arguments = self._cache_entry.arguments
+                        self.truncated = self._cache_entry.truncated
+                    else:
+                        self.env_vars = []
+                        self.binary = ""
+                        self.arguments = []
+                        self.truncated = False
+                        if isinstance(shell_args, str):
+                            tokens = shlex.split(shell_args)
+                        else:
+                            tokens = cast(list[str], shell_args)
+                        if shell:
+                            self.scrub_env_vars(tokens)
+                        else:
+                            self.binary = tokens[0]
+                            self.arguments = tokens[1:]
+                        self.arguments = list(self.arguments) if isinstance(self.arguments, tuple) else self.arguments
+                        self.scrub_arguments()
+                        self._cache_entry = SubprocessCmdLine._add_new_cache_entry(
+                            cache_key, self.env_vars, self.binary, self.arguments, self.truncated
+                        )
+
+                def scrub_env_vars(self, tokens):
+                    for idx, token in enumerate(tokens):
+                        if re.match(self._COMPILED_ENV_VAR_REGEXP, token):
+                            var, _ = token.split("=", 1)
+                            if var in self.ENV_VARS_ALLOWLIST:
+                                self.env_vars.append(token)
+                            else:
+                                self.env_vars.append("%s=?" % var)
+                        else:
+                            try:
+                                self.binary = tokens[idx]
+                                self.arguments = tokens[idx + 1 :]
+                            except IndexError:
+                                pass
+                            break
+
+                def scrub_arguments(self):
+                    if self.binary and self.binary.lower() in self.BINARIES_DENYLIST:
+                        self.arguments = ["?" for _ in self.arguments]
+                        return
+                    param_prefixes = ("-", "/")
+                    new_args = []
+                    deque_args = collections.deque(self.arguments)
+                    while deque_args:
+                        current = deque_args[0]
+                        for sensitive in self.SENSITIVE_WORDS_WILDCARDS + config.subprocess.sensitive_wildcards:
+                            if fnmatch(current, sensitive):
+                                is_sensitive = True
+                                break
+                        else:
+                            is_sensitive = False
+                        if not is_sensitive:
+                            new_args.append(current)
+                            deque_args.popleft()
+                            continue
+                        if current[0] not in param_prefixes:
+                            new_args.append("?")
+                            deque_args.popleft()
+                            continue
+                        if "=" in current:
+                            new_args.append("?")
+                            deque_args.popleft()
+                            continue
+                        try:
+                            if deque_args[1][0] in param_prefixes:
+                                new_args.append("?")
+                                deque_args.popleft()
+                                continue
+                            else:
+                                new_args.extend([current, "?"])
+                                deque_args.popleft()
+                                deque_args.popleft()
+                                continue
+                        except IndexError:
+                            new_args.append("?")
+                            deque_args.popleft()
+                    self.arguments = new_args
+            "#,
+        )?;
+        db.write_dedented(
+            "/src/main.py",
+            r#"
+            from mod import SubprocessCmdLine
+
+            x = y = SubprocessCmdLine("").arguments
+            "#,
+        )?;
+        Ok(())
+    }
+
+    fn x_type(db: &TestDb) -> String {
+        let file_main = system_path_to_file(db, "/src/main.py").unwrap();
+        global_symbol(db, file_main, "x")
+            .place
+            .expect_type()
+            .display(db)
+            .to_string()
+    }
+
+    fn infer_new_args_type(db: &TestDb) {
+        let file = system_path_to_file(db, "/src/mod.py").unwrap();
+        let module = parsed_module(db, file).load(db);
+        let index = semantic_index(db, file);
+        let mut file_scope_id = FileScopeId::global();
+        let mut scope = file_scope_id.to_scope_id(db, file);
+
+        for expected_scope_name in ["SubprocessCmdLine", "scrub_arguments"] {
+            (file_scope_id, scope) = index
+                .child_scopes(file_scope_id)
+                .map(|(file_scope_id, _)| (file_scope_id, file_scope_id.to_scope_id(db, file)))
+                .find(|(_, scope)| scope.name(db, &module) == expected_scope_name)
+                .unwrap();
+        }
+
+        let _ = symbol(db, scope, "new_args", ConsideredDefinitions::EndOfScope)
+            .place
+            .expect_type();
+    }
+
+    let mut direct = setup_db();
+    write_files(&mut direct)?;
+    let direct_x_type = x_type(&direct);
+
+    let mut primed = setup_db();
+    write_files(&mut primed)?;
+    // Inferring the full-scope collection before the implicit attribute used to change which
+    // Salsa query headed their shared cycle, producing a different `arguments` type.
+    infer_new_args_type(&primed);
+    let primed_x_type = x_type(&primed);
+
+    assert_eq!(direct_x_type, primed_x_type);
+    assert!(!direct_x_type.contains("_T@deque"));
+    Ok(())
+}
+
 /// This test verifies that changing a class's declaration in a non-meaningful way (e.g. by adding a comment)
 /// doesn't trigger type inference for expressions that depend on the class's members.
 #[test]

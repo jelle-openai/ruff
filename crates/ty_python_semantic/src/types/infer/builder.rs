@@ -72,6 +72,7 @@ use crate::types::function::{
 };
 use crate::types::generics::{
     GenericContext, InferableTypeVars, SpecializationBuilder, bind_typevar,
+    enclosing_generic_contexts,
 };
 use crate::types::infer::builder::named_tuple::NamedTupleKind;
 use crate::types::infer::builder::paramspec_validation::validate_paramspec_components;
@@ -97,8 +98,8 @@ use crate::types::{
     IntersectionType, KnownClass, KnownInstanceType, KnownUnion, LiteralValueTypeKind,
     MemberLookupPolicy, ParamSpecAttrKind, Parameter, ParameterForm, Parameters, SentinelInstance,
     Signature, SpecialFormType, SubclassOfType, Type, TypeAliasType, TypeAndQualifiers,
-    TypeContext, TypeQualifiers, TypeVarBoundOrConstraints, TypeVarKind, TypeVarVariance,
-    TypedDictType, UnionAccumulator, UnionBuilder, UnionType, binding_type,
+    TypeContext, TypeMapping, TypeQualifiers, TypeVarBoundOrConstraints, TypeVarKind, TypeVarScope,
+    TypeVarVariance, TypedDictType, UnionAccumulator, UnionBuilder, UnionType, binding_type,
     infer_complete_scope_types, infer_scope_types, todo_type,
 };
 use crate::{AnalysisSettings, Db, FxIndexSet, Program};
@@ -6538,6 +6539,19 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 DefinitionNodeKey::from_assignment(assignment.node(self.module())).exactly_one()
             && let Some(collection_def) = self.index.try_definition(collection_def)
         {
+            let in_scope_typevars = enclosing_generic_contexts(
+                self.db(),
+                self.index,
+                self.scope().file_scope_id(self.db()),
+            )
+            .fold(
+                InferableTypeVars::None,
+                |in_scope_typevars, generic_context| {
+                    in_scope_typevars
+                        .merge(self.db(), generic_context.inferable_typevars(self.db()))
+                },
+            );
+
             // For unconstrained collection literals, collect any constraints created by later uses
             // of this definition in the scope.
             for (statement, use_expression) in
@@ -6571,10 +6585,22 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                             continue;
                         }
 
+                        // A constraint can contain a typevar introduced while inferring the later
+                        // use expression, for example by a generic call. That typevar cannot be
+                        // specialized while inferring this collection literal, so don't let it
+                        // escape into this collection's type.
+                        let constraint = constraint.apply_type_mapping(
+                            self.db(),
+                            &TypeMapping::ReplaceOutOfScopeTypevars(TypeVarScope::new(
+                                in_scope_typevars,
+                            )),
+                            TypeContext::default(),
+                        );
+
                         builder
                             .infer_map(
                                 identity_instance,
-                                *constraint,
+                                constraint,
                                 // We promote element literal types in invariant position by default, unless they
                                 // were inferred with an explicit literal annotation.
                                 |(_, _, inferred_ty)| Some(inferred_ty.promote(self.db())),
