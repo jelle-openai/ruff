@@ -7,7 +7,18 @@ Goal: find distinct sources of nondeterministic behavior in `ty`, fix each confi
 - Prefer a small reproducer before changing code.
 - Treat output ordering, inference results, diagnostics, snapshots, and incremental behavior as possible nondeterminism surfaces.
 - Keep each PR focused on one root cause with a regression test.
+- Put the exact nondeterministic behavior and the root cause in each PR body, not just the symptom or chosen fix.
 - Update this file with confirmed patterns, useful commands, and ruled-out leads as the investigation progresses.
+
+## Upstream transfer workflow
+
+Only run this after the user gives an explicit OK to transfer a specific PR to `astral-sh/ruff`.
+
+1. Re-read the focused `jelle-openai/ruff` PR and nearby ty history or PR discussion for similar fixes, then adjust the change if needed so the implementation and regression test match existing ty style.
+1. Start from the latest `upstream/main`, rebase or recreate the focused branch there, and verify the diff contains only the issue-specific change intended for the main repo.
+1. Remove investigation-only or fork-only changes before transfer, including `GOAL.md` and any notes that belong only in `jelle-openai/ruff`.
+1. Run the focused regression, the relevant crate test suite, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `uvx prek run --files ...`, and any extra validation appropriate for the touched paths.
+1. Push the cleaned branch to the fork, open a draft PR against `astral-sh/ruff` with a concise root-cause description and `ty` label, then verify GitHub CI passes before calling the transfer done.
 
 ## Initial leads
 
@@ -22,12 +33,14 @@ Goal: find distinct sources of nondeterministic behavior in `ty`, fix each confi
 - Existing inference tests use a useful perturbation pattern: type-check an unrelated file first, then inspect the target file after Salsa has cached and interned a different path.
 - Confirmed a current `dd-trace-py` primer flake after `95eec58af2`: twelve `TY_MAX_PARALLELISM=8` full-project runs on unpatched `main` produced two concise diagnostic hashes, and the differing diagnostic came from `SubprocessCmdLine.arguments`.
 - Minimized that flake to a full-scope `new_args = []` collection inside an implicit instance attribute cycle. Priming `new_args` before reading `SubprocessCmdLine("").arguments` changed the inferred `arguments` type, so query entrypoint was affecting the fixed point.
-- Root cause: a later collection use could feed a typevar owned by an inner generic call such as `collections.deque(...)` back into full-scope collection inference. That out-of-scope typevar sometimes escaped as `_T@deque` and sometimes became `Unknown`, depending on which query headed the shared cycle.
+- Exact nondeterminism: the same `dd-trace-py` source sometimes inferred `SubprocessCmdLine.arguments` as `list[Unknown | str]` and sometimes as `list[_T@deque | str]`, changing the emitted diagnostic text. Parallel file checking changed which query first entered the shared implicit-attribute/full-scope-collection Salsa cycle.
+- Root cause: a later collection use could feed a typevar owned by an inner generic call such as `collections.deque(...)` back into full-scope collection inference. That out-of-scope typevar was not meaningful in the collection literal's enclosing generic scope, but whether it escaped or collapsed to `Unknown` depended on the cycle entrypoint.
 - Fix direction for the first PR: replace typevars not bound by an enclosing generic context with `Unknown` before using later-use constraints for full-scope collection literals; keep in-scope generic typevars intact.
 - Published the first confirmed fix as `jelle-openai/ruff#3`.
 - Removed `dd-trace-py` from the flaky primer list in that PR after eight final parallel concise checks produced the same diagnostic hash.
 - The `scikit-build-core` flake was not semantic inference: missing runs indexed 173 files while present runs indexed 185, omitting tracked `src/scikit_build_core/build/*.py` files before diagnostics could be checked.
-- The same omission reproduced below ty with parallel multi-root `rg --files src tests noxfile.py`; a minimal `.gitignore` containing `tests/**/build/` sometimes hid a source `build` package during one combined `ignore` walk.
+- Exact nondeterminism: `ty check ... src tests noxfile.py` sometimes included source `build` packages and emitted 77 diagnostics, and sometimes excluded those same tracked files and emitted 75 diagnostics. The omitted files contained the two disappearing diagnostics.
+- Root cause: the project index passed `src`, `tests`, and `noxfile.py` into one parallel multi-root `ignore` walk. With `.gitignore` containing `tests/**/build/`, the `tests`-scoped ignore rule could sometimes be applied while visiting the source `src/scikit_build_core/build/` package, depending on worker scheduling.
 - Fix direction for the second PR: walk OS directory roots independently so ignore matching cannot depend on worker scheduling across roots.
 - Published the second confirmed fix as `jelle-openai/ruff#4`.
 - Removed `scikit-build-core` from the flaky primer list in that PR after 100 final parallel concise checks produced the same diagnostic hash.
