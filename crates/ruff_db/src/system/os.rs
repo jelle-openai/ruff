@@ -448,74 +448,69 @@ impl DirectoryWalker for OsDirectoryWalker {
             standard_filters,
         } = configuration;
 
-        let Some((first, additional)) = paths.split_first() else {
-            return;
-        };
+        // `ignore` can resolve ignore rules inconsistently during a parallel multi-root walk.
+        // Walk roots separately so the indexed files don't depend on worker scheduling.
+        for path in paths {
+            let mut builder = ignore::WalkBuilder::new(path.as_std_path());
+            builder.current_dir(self.cwd.as_std_path());
 
-        let mut builder = ignore::WalkBuilder::new(first.as_std_path());
-        builder.current_dir(self.cwd.as_std_path());
+            builder.standard_filters(standard_filters);
+            builder.hidden(hidden);
+            builder.threads(max_parallelism().min(NonZeroUsize::new(12).unwrap()).get());
 
-        builder.standard_filters(standard_filters);
-        builder.hidden(hidden);
+            builder.build_parallel().run(|| {
+                let mut visitor = visitor_builder.build();
 
-        for additional_path in additional {
-            builder.add(additional_path.as_std_path());
-        }
+                Box::new(move |entry| {
+                    match entry {
+                        Ok(entry) => {
+                            // SAFETY: The walkdir crate supports `stdin` files and `file_type` can be `None` for these files.
+                            //   We don't make use of this feature, which is why unwrapping here is ok.
+                            let file_type = entry.file_type().unwrap();
+                            let depth = entry.depth();
 
-        builder.threads(max_parallelism().min(NonZeroUsize::new(12).unwrap()).get());
-
-        builder.build_parallel().run(|| {
-            let mut visitor = visitor_builder.build();
-
-            Box::new(move |entry| {
-                match entry {
-                    Ok(entry) => {
-                        // SAFETY: The walkdir crate supports `stdin` files and `file_type` can be `None` for these files.
-                        //   We don't make use of this feature, which is why unwrapping here is ok.
-                        let file_type = entry.file_type().unwrap();
-                        let depth = entry.depth();
-
-                        // `walkdir` reports errors related to parsing ignore files as part of the entry.
-                        // These aren't fatal for us. We should keep going even if an ignore file contains a syntax error.
-                        // But we log the error here for better visibility (same as ripgrep, Ruff ignores it)
-                        if let Some(error) = entry.error() {
-                            tracing::warn!("{error}");
-                        }
-
-                        match SystemPathBuf::from_path_buf(entry.into_path()) {
-                            Ok(path) => {
-                                let directory_entry = walk_directory::DirectoryEntry {
-                                    path,
-                                    file_type: file_type.into(),
-                                    depth,
-                                };
-
-                                visitor.visit(Ok(directory_entry)).into()
+                            // `walkdir` reports errors related to parsing ignore files as part of the entry.
+                            // These aren't fatal for us. We should keep going even if an ignore file contains a syntax error.
+                            // But we log the error here for better visibility (same as ripgrep, Ruff ignores it)
+                            if let Some(error) = entry.error() {
+                                tracing::warn!("{error}");
                             }
-                            Err(path) => {
-                                visitor.visit(Err(walk_directory::Error {
-                                    depth: Some(depth),
-                                    kind: walk_directory::ErrorKind::NonUtf8Path { path },
-                                }));
 
-                                // Skip the entire directory because all the paths won't be UTF-8 paths.
-                                ignore::WalkState::Skip
+                            match SystemPathBuf::from_path_buf(entry.into_path()) {
+                                Ok(path) => {
+                                    let directory_entry = walk_directory::DirectoryEntry {
+                                        path,
+                                        file_type: file_type.into(),
+                                        depth,
+                                    };
+
+                                    visitor.visit(Ok(directory_entry)).into()
+                                }
+                                Err(path) => {
+                                    visitor.visit(Err(walk_directory::Error {
+                                        depth: Some(depth),
+                                        kind: walk_directory::ErrorKind::NonUtf8Path { path },
+                                    }));
+
+                                    // Skip the entire directory because all the paths won't be UTF-8 paths.
+                                    ignore::WalkState::Skip
+                                }
                             }
                         }
+                        Err(error) => match ignore_to_walk_directory_error(error, None, None) {
+                            Ok(error) => visitor.visit(Err(error)).into(),
+                            Err(error) => {
+                                // This should only be reached when the error is a `.ignore` file related error
+                                // (which, should not be reported here but the `ignore` crate doesn't distinguish between ignore and IO errors).
+                                // Let's log the error to at least make it visible.
+                                tracing::warn!("Failed to traverse directory: {error}.");
+                                ignore::WalkState::Continue
+                            }
+                        },
                     }
-                    Err(error) => match ignore_to_walk_directory_error(error, None, None) {
-                        Ok(error) => visitor.visit(Err(error)).into(),
-                        Err(error) => {
-                            // This should only be reached when the error is a `.ignore` file related error
-                            // (which, should not be reported here but the `ignore` crate doesn't distinguish between ignore and IO errors).
-                            // Let's log the error to at least make it visible.
-                            tracing::warn!("Failed to traverse directory: {error}.");
-                            ignore::WalkState::Continue
-                        }
-                    },
-                }
-            })
-        });
+                })
+            });
+        }
     }
 }
 
@@ -879,6 +874,48 @@ mod tests {
     ),
 }"#
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn walk_multiple_directories_with_nested_ignore_rule() -> std::io::Result<()> {
+        let tempdir = TempDir::new()?;
+
+        let root = tempdir.path();
+        std::fs::create_dir_all(root.join(".git"))?;
+        std::fs::create_dir_all(root.join("src/scikit_build_core/build"))?;
+        std::fs::create_dir_all(root.join("tests"))?;
+        std::fs::write(root.join(".gitignore"), "tests/**/build/\n")?;
+        std::fs::write(
+            root.join("src/scikit_build_core/build/metadata.py"),
+            "print('metadata')\n",
+        )?;
+        std::fs::write(root.join("tests/test_metadata.py"), "print('test')\n")?;
+
+        let root_sys = SystemPath::from_std_path(root).unwrap();
+        let system = OsSystem::new(root_sys);
+
+        for _ in 0..100 {
+            let writer = DirectoryEntryToString::new(root_sys.to_path_buf());
+
+            system
+                .walk_directory(&root_sys.join("src"))
+                .add(root_sys.join("tests"))
+                .standard_filters(true)
+                .run(|| {
+                    Box::new(|entry| {
+                        writer.write_entry(entry);
+                        WalkState::Continue
+                    })
+                });
+
+            assert!(
+                writer
+                    .to_string()
+                    .contains("src/scikit_build_core/build/metadata.py")
+            );
+        }
 
         Ok(())
     }
