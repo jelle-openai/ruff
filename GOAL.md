@@ -53,3 +53,7 @@ Only run this after the user gives an explicit OK to transfer a specific PR to `
 - Root cause: `CollectReporter` receives checked-file diagnostics from Rayon workers and sorts them with `Diagnostic::rendering_sort_key`; for those spanless same-ID panic diagnostics, the existing key compared no file/range and then tied on severity and ID, so Rust's stable sort preserved the race-dependent collection order.
 - Fix direction for the third PR: keep the existing file/range, severity, and diagnostic-ID ordering, then use the concise rendered message as a final visible tie-breaker so same-key spanless diagnostics sort canonically.
 - Published the third confirmed fix as `jelle-openai/ruff#5`.
+- Exact nondeterminism for the separate Salsa payload lead: the same generated panic payload sometimes printed `[salsa id]: Id(2896)` and sometimes different IDs such as `Id(2c96)` or `Id(2496)` across equivalent parallel runs, even before considering the separate fatal-diagnostic line order.
+- Root cause: `ruff_db::panic::Payload` formatted string panic payloads verbatim, while Salsa's generated `Debug` output includes intern IDs assigned according to query interning order. Those IDs are internal and race-dependent, so exposing them made user-facing panic diagnostics vary.
+- Fix direction for the fourth PR: normalize Salsa IDs at the panic-output boundary by preserving the payload structure but replacing the volatile `Id(...)` contents with `_`.
+- Published the fourth confirmed fix as `jelle-openai/ruff#6`.
