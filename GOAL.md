@@ -25,3 +25,4 @@ Goal: find distinct sources of nondeterministic behavior in `ty`, fix each confi
 - Root cause: a later collection use could feed a typevar owned by an inner generic call such as `collections.deque(...)` back into full-scope collection inference. That out-of-scope typevar sometimes escaped as `_T@deque` and sometimes became `Unknown`, depending on which query headed the shared cycle.
 - Fix direction for the first PR: replace typevars not bound by an enclosing generic context with `Unknown` before using later-use constraints for full-scope collection literals; keep in-scope generic typevars intact.
 - Published the first confirmed fix as `jelle-openai/ruff#3`.
+- Removed `dd-trace-py` from the flaky primer list in that PR after eight final parallel concise checks produced the same diagnostic hash.

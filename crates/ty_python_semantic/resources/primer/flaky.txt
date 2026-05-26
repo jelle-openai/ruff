@@ -1,3 +1,2 @@
 pydantic
 scikit-build-core
-dd-trace-py
