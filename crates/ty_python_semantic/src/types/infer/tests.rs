@@ -487,142 +487,42 @@ fn full_scope_collection_implicit_attribute_cycle_is_entrypoint_independent() ->
             r#"
             import collections
             from fnmatch import fnmatch
-            import re
-            import shlex
-            from dataclasses import dataclass
-            from typing import Optional, Union, cast
 
-            class ConfigSubprocess:
-                sensitive_wildcards: list[str] = []
-
-            class Config:
-                subprocess = ConfigSubprocess()
-
-            config = Config()
-
-            class RLock:
-                def __enter__(self): ...
-                def __exit__(self, *args): ...
-
-            @dataclass(eq=False)
             class SubprocessCmdLineCacheEntry:
-                binary: Optional[str] = None
-                arguments: Optional[list] = None
-                truncated: bool = False
-                env_vars: Optional[list] = None
+                arguments: list | None = None
 
             class SubprocessCmdLine:
                 _CACHE: dict[str, SubprocessCmdLineCacheEntry] = {}
-                _CACHE_DEQUE: collections.deque[str] = collections.deque()
-                _CACHE_MAXSIZE = 32
-                _CACHE_LOCK = RLock()
-                ENV_VARS_ALLOWLIST = {"LD_PRELOAD"}
                 BINARIES_DENYLIST = {"md5"}
-                SENSITIVE_WORDS_WILDCARDS = ["*password*"]
-                _COMPILED_ENV_VAR_REGEXP = re.compile(r"\b[A-Z_][A-Z0-9_]*=\w+")
 
-                @classmethod
-                def _add_new_cache_entry(cls, key, env_vars, binary, arguments, truncated):
-                    if key in cls._CACHE:
-                        return
+                @staticmethod
+                def _add_new_cache_entry(arguments):
                     cache_entry = SubprocessCmdLineCacheEntry()
-                    cache_entry.binary = binary
                     cache_entry.arguments = arguments
-                    cache_entry.truncated = truncated
-                    cache_entry.env_vars = env_vars
-                    with cls._CACHE_LOCK:
-                        if len(cls._CACHE_DEQUE) >= cls._CACHE_MAXSIZE:
-                            last_cache_key = cls._CACHE_DEQUE[-1]
-                            del cls._CACHE[last_cache_key]
-                            cls._CACHE_DEQUE.pop()
-                        cls._CACHE[key] = cache_entry
-                        cls._CACHE_DEQUE.appendleft(key)
                     return cache_entry
 
-                def __init__(self, shell_args: Union[str, list[str]], shell: bool = False) -> None:
-                    cache_key = str(shell_args) + str(shell)
-                    self._cache_entry = SubprocessCmdLine._CACHE.get(cache_key)
+                def __init__(self) -> None:
+                    self._cache_entry = SubprocessCmdLine._CACHE.get("")
                     if self._cache_entry:
-                        self.env_vars = self._cache_entry.env_vars
-                        self.binary = self._cache_entry.binary
                         self.arguments = self._cache_entry.arguments
-                        self.truncated = self._cache_entry.truncated
                     else:
-                        self.env_vars = []
-                        self.binary = ""
                         self.arguments = []
-                        self.truncated = False
-                        if isinstance(shell_args, str):
-                            tokens = shlex.split(shell_args)
-                        else:
-                            tokens = cast(list[str], shell_args)
-                        if shell:
-                            self.scrub_env_vars(tokens)
-                        else:
-                            self.binary = tokens[0]
-                            self.arguments = tokens[1:]
-                        self.arguments = list(self.arguments) if isinstance(self.arguments, tuple) else self.arguments
+                        tokens = [""]
+                        self.binary = tokens[0]
+                        self.arguments = tokens[1:]
                         self.scrub_arguments()
-                        self._cache_entry = SubprocessCmdLine._add_new_cache_entry(
-                            cache_key, self.env_vars, self.binary, self.arguments, self.truncated
-                        )
-
-                def scrub_env_vars(self, tokens):
-                    for idx, token in enumerate(tokens):
-                        if re.match(self._COMPILED_ENV_VAR_REGEXP, token):
-                            var, _ = token.split("=", 1)
-                            if var in self.ENV_VARS_ALLOWLIST:
-                                self.env_vars.append(token)
-                            else:
-                                self.env_vars.append("%s=?" % var)
-                        else:
-                            try:
-                                self.binary = tokens[idx]
-                                self.arguments = tokens[idx + 1 :]
-                            except IndexError:
-                                pass
-                            break
+                        self._cache_entry = SubprocessCmdLine._add_new_cache_entry(self.arguments)
 
                 def scrub_arguments(self):
                     if self.binary and self.binary.lower() in self.BINARIES_DENYLIST:
                         self.arguments = ["?" for _ in self.arguments]
                         return
-                    param_prefixes = ("-", "/")
                     new_args = []
                     deque_args = collections.deque(self.arguments)
-                    while deque_args:
+                    if deque_args:
                         current = deque_args[0]
-                        for sensitive in self.SENSITIVE_WORDS_WILDCARDS + config.subprocess.sensitive_wildcards:
-                            if fnmatch(current, sensitive):
-                                is_sensitive = True
-                                break
-                        else:
-                            is_sensitive = False
-                        if not is_sensitive:
-                            new_args.append(current)
-                            deque_args.popleft()
-                            continue
-                        if current[0] not in param_prefixes:
-                            new_args.append("?")
-                            deque_args.popleft()
-                            continue
-                        if "=" in current:
-                            new_args.append("?")
-                            deque_args.popleft()
-                            continue
-                        try:
-                            if deque_args[1][0] in param_prefixes:
-                                new_args.append("?")
-                                deque_args.popleft()
-                                continue
-                            else:
-                                new_args.extend([current, "?"])
-                                deque_args.popleft()
-                                deque_args.popleft()
-                                continue
-                        except IndexError:
-                            new_args.append("?")
-                            deque_args.popleft()
+                        fnmatch(current, "*password*")
+                        new_args.extend([current, "?"])
                     self.arguments = new_args
             "#,
         )?;
@@ -631,7 +531,7 @@ fn full_scope_collection_implicit_attribute_cycle_is_entrypoint_independent() ->
             r#"
             from mod import SubprocessCmdLine
 
-            x = y = SubprocessCmdLine("").arguments
+            x = y = SubprocessCmdLine().arguments
             "#,
         )?;
         Ok(())
