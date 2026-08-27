@@ -374,6 +374,16 @@
             }
           ]
         },
+        "assert-always-truthy": {
+          "title": "detects assertions of values whose types are always truthy",
+          "description": "## What it does\n\nChecks for assertions of non-boolean values whose inferred types are always truthy.\n\n## Why is this bad?\n\nAn assertion of an always-truthy value cannot detect an incorrect result. For example,\nordinary enum members are truthy even when their underlying value is zero. Asserting an\nenum result therefore does not check which member was returned.\n\nThis can also indicate a missing function call or an assertion of a nonempty tuple instead\nof its contents. Compare against the expected value or check the intended property explicitly.\n\nValues of type `bool` are exempt, including `Literal[True]`, because\nthey can be intentional runtime checks of properties that are also expressed in type annotations.\nTypes with unknown truthiness, including `Any`, are not reported.\n\n## Example\n\n```python\nfrom enum import Enum\n\n\nclass Result(Enum):\n    FAILURE = 0\n    SUCCESS = 1\n\n\ndef run() -> Result:\n    return Result.FAILURE\n\n\nassert run()  # error\n```\n\nUse instead:\n\n```python\nassert run() is Result.SUCCESS\n```",
+          "default": "warn",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/Level"
+            }
+          ]
+        },
         "assert-type-unspellable-subtype": {
           "title": "detects failed type assertions",
           "description": "## What it does\n\nChecks for `assert_type()` calls where the actual type\nis an unspellable subtype of the asserted type.\n\n## Why is this bad?\n\n`assert_type()` is intended to ensure that the inferred type of a value\nis exactly the same as the asserted type. But in some situations, ty\nhas nonstandard extensions to the type system that allow it to infer\nmore precise types than can be expressed in user annotations. ty emits a\ndifferent error code to `type-assertion-failure` in these situations so\nthat users can easily differentiate between the two cases.\n\n## Example\n\n```toml\n[environment]\npython-version = \"3.11\"\n```\n\n```python\nfrom typing import assert_type\n\n\ndef _(x: int):\n    assert_type(x, int)  # fine\n    if x:\n        # the actual type is `int & ~AlwaysFalsy`,\n        # which excludes types like `Literal[0]`\n        # error: [assert-type-unspellable-subtype]\n        assert_type(x, int)\n```",
