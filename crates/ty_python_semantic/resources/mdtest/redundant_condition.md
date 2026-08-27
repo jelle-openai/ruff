@@ -46,7 +46,7 @@ def work(items: list[int]):
     filtered = (item for item in items if item < 42)
     if filtered:  # # TODO: should error
         pass
-    assert filtered  # # TODO: should error
+    assert filtered  # error: [assert-always-truthy]
 ```
 
 And testing an awaitable without awaiting it:
@@ -78,9 +78,9 @@ class Foo:
         if self.no_elements:  # TODO: should error
             pass
 
-        # TODO: should error
+        # error: [assert-always-truthy]
         assert self.at_least_one_element
-        # TODO: should error
+        # error: [assert-always-truthy]
         assert self.at_least_two_elements
 ```
 
@@ -152,8 +152,8 @@ def test(
     if also_sometimes_empty:  # no diagnostic
         pass
 
-    assert never_empty  # TODO: should error
-    assert also_never_empty  # TODO: should error
+    assert never_empty  # error: [assert-always-truthy]
+    assert also_never_empty  # error: [assert-always-truthy]
     assert sometimes_empty  # no diagnostic
     assert also_sometimes_empty  # no diagnostic
 ```
@@ -228,7 +228,7 @@ def function(flag: bool):
         pass
 
 def _():
-    assert func  # TODO: should error
+    assert func  # error: [assert-always-truthy]
 
 def _():
     while func and coinflip():  # TODO: should error
@@ -468,7 +468,7 @@ The strict rule can still fire in assertion tests if the assertion test uses a w
 with `redundant-condition-strict`):
 
 ```py
-# TODO: should error
+# error: [assert-always-truthy]
 assert (value := "foo")
 ```
 

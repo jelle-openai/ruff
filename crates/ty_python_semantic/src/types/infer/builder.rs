@@ -61,17 +61,18 @@ use crate::types::constraints::{ConstraintSetBuilder, PathBounds, Solutions};
 use crate::types::context::InferContext;
 use crate::types::dedicated::pydantic;
 use crate::types::diagnostic::{
-    self, CALL_NON_CALLABLE, CONFLICTING_DECLARATIONS, CYCLIC_TYPE_ALIAS_DEFINITION,
-    DYNAMIC_FUNCTION_DECORATOR_RETURN, GeneratorMismatchKind, INEFFECTIVE_FINAL,
-    INVALID_ARGUMENT_TYPE, INVALID_ASSIGNMENT, INVALID_DECLARATION, INVALID_ENUM_MEMBER_ANNOTATION,
-    INVALID_LEGACY_TYPE_VARIABLE, INVALID_NEWTYPE, INVALID_PARAMSPEC, INVALID_TYPE_ALIAS_TYPE,
-    INVALID_TYPE_FORM, INVALID_TYPE_VARIABLE_BOUND, INVALID_TYPE_VARIABLE_CONSTRAINTS,
-    INVALID_TYPE_VARIABLE_DEFAULT, POSSIBLY_MISSING_IMPLICIT_CALL, POSSIBLY_MISSING_SUBMODULE,
-    TypeCheckDiagnostics, UNDEFINED_REVEAL, UNRESOLVED_ATTRIBUTE, UNRESOLVED_GLOBAL,
-    UNRESOLVED_REFERENCE, UNSOUND_ASSIGNMENT, UNSOUND_YIELD, UNSUPPORTED_OPERATOR,
-    UNUSED_AWAITABLE, YieldKind, autofix_with_notimplementederror,
-    hint_if_stdlib_attribute_exists_on_other_versions, report_attempted_protocol_instantiation,
-    report_bad_dunder_delattr_call, report_bad_dunder_delete_call, report_call_to_abstract_method,
+    self, ASSERT_ALWAYS_TRUTHY, CALL_NON_CALLABLE, CONFLICTING_DECLARATIONS,
+    CYCLIC_TYPE_ALIAS_DEFINITION, DYNAMIC_FUNCTION_DECORATOR_RETURN, GeneratorMismatchKind,
+    INEFFECTIVE_FINAL, INVALID_ARGUMENT_TYPE, INVALID_ASSIGNMENT, INVALID_DECLARATION,
+    INVALID_ENUM_MEMBER_ANNOTATION, INVALID_LEGACY_TYPE_VARIABLE, INVALID_NEWTYPE,
+    INVALID_PARAMSPEC, INVALID_TYPE_ALIAS_TYPE, INVALID_TYPE_FORM, INVALID_TYPE_VARIABLE_BOUND,
+    INVALID_TYPE_VARIABLE_CONSTRAINTS, INVALID_TYPE_VARIABLE_DEFAULT,
+    POSSIBLY_MISSING_IMPLICIT_CALL, POSSIBLY_MISSING_SUBMODULE, TypeCheckDiagnostics,
+    UNDEFINED_REVEAL, UNRESOLVED_ATTRIBUTE, UNRESOLVED_GLOBAL, UNRESOLVED_REFERENCE,
+    UNSOUND_ASSIGNMENT, UNSOUND_YIELD, UNSUPPORTED_OPERATOR, UNUSED_AWAITABLE, YieldKind,
+    autofix_with_notimplementederror, hint_if_stdlib_attribute_exists_on_other_versions,
+    report_attempted_protocol_instantiation, report_bad_dunder_delattr_call,
+    report_bad_dunder_delete_call, report_call_to_abstract_method,
     report_cannot_pop_required_field_on_typed_dict, report_dynamic_function_decorator_return,
     report_invalid_assignment, report_invalid_class_match_pattern, report_invalid_exception_caught,
     report_invalid_exception_cause, report_invalid_exception_raised,
@@ -5191,8 +5192,20 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
         let test_ty = self.infer_standalone_expression(test, TypeContext::default());
 
-        if let Err(err) = test_ty.try_bool(db, self.program_environment()) {
-            err.report_diagnostic(&self.context, &**test);
+        let env = self.program_environment();
+        match test_ty.try_bool(db, env) {
+            Ok(Truthiness::AlwaysTrue)
+                if !test_ty.is_assignable_to(db, env, KnownClass::Bool.to_instance(db, env))
+                    && let Some(builder) =
+                        self.context.report_lint(&ASSERT_ALWAYS_TRUTHY, &**test) =>
+            {
+                builder.into_diagnostic(format_args!(
+                    "Assertion is always true for type `{}`",
+                    test_ty.display(db, env),
+                ));
+            }
+            Err(err) => err.report_diagnostic(&self.context, &**test),
+            Ok(_) => {}
         }
 
         self.infer_optional_expression(msg.as_deref(), TypeContext::default());

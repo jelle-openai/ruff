@@ -163,6 +163,7 @@ pub(crate) fn register_lints(registry: &mut LintRegistryBuilder) {
     registry.register_lint(&UNUSED_AWAITABLE);
     registry.register_lint(&ZERO_STEPSIZE_IN_SLICE);
     registry.register_lint(&STATIC_ASSERT_ERROR);
+    registry.register_lint(&ASSERT_ALWAYS_TRUTHY);
     registry.register_lint(&INVALID_ATTRIBUTE_ACCESS);
     registry.register_lint(&REDUNDANT_CAST);
     registry.register_lint(&REDUNDANT_FINAL_CLASSVAR);
@@ -1216,6 +1217,15 @@ declare_lint! {
         summary: "Failed static assertion",
         status: LintStatus::stable("0.0.1-alpha.1"),
         default_level: Level::Error,
+    }
+}
+
+declare_lint! {
+    #[doc = include_str!("../../resources/lint_docs/assert-always-truthy.md")]
+    pub(crate) static ASSERT_ALWAYS_TRUTHY = {
+        summary: "detects assertions of values whose types are always truthy",
+        status: LintStatus::stable("0.0.76"),
+        default_level: Level::Warn,
     }
 }
 
