@@ -796,6 +796,41 @@ async def main_async_generator():
         reveal_type(session)  # revealed: Session
 ```
 
+## Recursive protocols with restricted receivers
+
+Checking an async context manager that yields a recursive protocol preserves its type and the
+methods available on that specialization. The two branches below produce successively nested
+specializations; checking the decorator does not need to expand them to bind `read`.
+
+Regression test for <https://github.com/astral-sh/ty/issues/4629>.
+
+```toml
+[environment]
+python-version = "3.13"
+```
+
+```py
+from __future__ import annotations
+
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+from typing import Protocol
+
+class Node[T](Protocol):
+    def left(self) -> Node[tuple[T, T]]: ...
+    def right(self) -> Node[tuple[T, T]]: ...
+    def read(self: Node[int]) -> int: ...
+
+@asynccontextmanager
+async def open_node(node: Node[int]) -> AsyncGenerator[Node[int], None]:
+    yield node
+
+async def use(node: Node[int]):
+    async with open_node(node) as value:
+        reveal_type(value)  # revealed: Node[int]
+        reveal_type(value.read())  # revealed: int
+```
+
 ## `asyncio.timeout`
 
 ```toml
