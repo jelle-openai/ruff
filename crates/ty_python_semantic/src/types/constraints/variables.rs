@@ -12,7 +12,7 @@ use crate::types::constraints::{
     SourceOrderId, max_constructor_and_typevar_depth, wobble_index,
 };
 use crate::types::typevar::{BoundTypeVarInstance, TypeVarDomain, TypeVarSet};
-use crate::types::{ApplyTypeMappingVisitor, Type, TypeContext, TypeMapping};
+use crate::types::{ApplyTypeMappingVisitor, BindingContext, Type, TypeContext, TypeMapping};
 use crate::{Db, ProgramEnvironment};
 
 /// The _provenance_ of a BDD constraint.
@@ -774,6 +774,36 @@ impl<'db> ConcreteUpperBound<'db> {
         let bound = self
             .bound
             .apply_type_mapping_impl(db, type_mapping, tcx, visitor);
+        // A protocol method's explicit `self: P[S]` guards the specialization on which
+        // that method is available. For a receiver that is also P, check the type arguments
+        // rather than rechecking P's whole interface (which includes this same method).
+        // Other receiver protocols still require the normal structural check.
+        if matches!(type_mapping, TypeMapping::BindSelf(_))
+            && matches!(
+                self.typevar.binding_context(db),
+                BindingContext::Synthetic(_)
+            )
+            && self.typevar.typevar(db).is_self(db)
+            && let (Some(source), Some(target)) =
+                (subject.as_protocol_instance(), bound.as_protocol_instance())
+            && let (Some(source_origin), Some(target_origin)) =
+                (source.class_origin(db), target.class_origin(db))
+            && source_origin.class_literal(db) == target_origin.class_literal(db)
+            && let (Some(source_nominal), Some(target_nominal)) = (
+                source.nominal_origin_instance(db),
+                target.nominal_origin_instance(db),
+            )
+        {
+            return builder.storage.borrow_mut().load(
+                db,
+                env,
+                &Type::NominalInstance(source_nominal).when_constraint_set_assignable_to_owned(
+                    db,
+                    env,
+                    Type::NominalInstance(target_nominal),
+                ),
+            );
+        }
         let mut storage = builder.storage.borrow_mut();
         match subject {
             Type::TypeVar(typevar) => {

@@ -7228,6 +7228,61 @@ def check(value: Chain[tuple[int, str]]) -> None:
     reveal_type(value.map_star(lambda first, second: 1))  # revealed: Chain[Literal[1]]
 ```
 
+### Receiver annotations naming a different protocol
+
+When a method annotates its receiver with a different protocol, the receiver is checked
+structurally. `Marked` has the required `mark` method and can implement `HasMethod`; `Unmarked`
+cannot.
+
+```py
+from typing import Protocol
+
+class Marker(Protocol):
+    def mark(self) -> bytes: ...
+
+class HasMethod(Protocol):
+    def require(self: Marker) -> bytes: ...
+
+class Marked(Protocol):
+    def require(self) -> bytes: ...
+    def mark(self) -> bytes: ...
+
+class Unmarked(Protocol):
+    def require(self) -> bytes: ...
+
+def structural(ok: Marked, bad: Unmarked):
+    allowed: HasMethod = ok
+    rejected: HasMethod = bad  # error: [invalid-assignment]
+```
+
+### Overloads specialized to the protocol receiver
+
+When an overloaded method annotates its receiver with its own protocol, the receiver's type
+arguments select the matching overload. No overload is available for `Source[bytes]`.
+
+```toml
+[environment]
+python-version = "3.12"
+```
+
+```py
+from __future__ import annotations
+
+from typing import Protocol, overload
+
+class Source[T](Protocol):
+    def value(self) -> T: ...
+    @overload
+    def select(self: Source[int]) -> int: ...
+    @overload
+    def select(self: Source[str]) -> str: ...
+
+def overload_guard(good: Source[int], other: Source[str], mismatch: Source[bytes]):
+    reveal_type(good.select())  # revealed: int
+    reveal_type(other.select())  # revealed: str
+    reveal_type(mismatch.select)  # revealed: Overload[]
+```
+
 ### Structural inference from recursive protocol requirements
 
 An inherited protocol specialization can erase a class type parameter. A recursive member can still
